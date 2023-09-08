@@ -31,8 +31,21 @@ struct LoadStoreConversionBase {
     return valueVals;
   }
 
+  unsigned getContiguity(Value ptr) const {
+    auto tensorTy = ptr.getType().dyn_cast<RankedTensorType>();
+    if (!tensorTy)
+      return 1;
+    return axisAnalysisPass.getPtrContiguity(ptr);
+  }
+
   unsigned getVectorSize(Value ptr) const {
-    return axisAnalysisPass.getPtrVectorSize(ptr);
+    auto tensorTy = ptr.getType().dyn_cast<RankedTensorType>();
+    if (!tensorTy)
+      return 1;
+    auto contiguity = getContiguity(ptr);
+    auto pointeeBitWidth = getPointeeBitWidth(tensorTy);
+    // The maximum vector size is 128 bits on NVIDIA GPUs.
+    return std::min<unsigned>(128 / pointeeBitWidth, contiguity);
   }
 
   unsigned getMaskAlignment(Value mask) const {
@@ -734,7 +747,10 @@ struct InsertSliceAsyncOpConversion
       assert(srcElems.size() == otherElems.size());
     }
 
-    unsigned inVec = getVectorSize(src);
+    // We don't use getVec() here because we are copying from memory to memory.
+    // If contiguity > vector size, we can have one pointer maintaining the
+    // start of the vector and the other pointer moving to the next vector.
+    unsigned inVec = getContiguity(src);
     unsigned outVec = resSharedLayout.getVec();
     unsigned minVec = std::min(outVec, inVec);
     unsigned numElems = getElemsPerThread(srcTy);
@@ -760,7 +776,6 @@ struct InsertSliceAsyncOpConversion
     auto srcIndices = emitIndices(loc, rewriter, srcBlockedLayout, srcShape);
 
     for (unsigned elemIdx = 0; elemIdx < numElems; elemIdx += minVec) {
-
       // 16 * 8 = 128bits
       auto maxBitWidth =
           std::max<unsigned>(128, resElemTy.getIntOrFloatBitWidth());
